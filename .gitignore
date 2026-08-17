@@ -1,0 +1,17 @@
+# Cache e bytecode do Python
+__pycache__/
+*.py[cod]
+
+# Ambientes virtuais
+.venv/
+venv/
+
+# Conteudo baixado e estado de sessao -- nunca versionar:
+# sao arquivos grandes e podem conter material de terceiros.
+downloads/
+.state/
+*.torrent
+*.fastresume
+*.parts
+
+*.log
