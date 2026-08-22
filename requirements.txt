@@ -1,0 +1,13 @@
+# Torrent Downloader -- dependencias de runtime.
+#
+# libtorrent (python-libtorrent / libtorrent) faz todo o trabalho de rede e de
+# protocolo BitTorrent; o resto do programa e' Tkinter e biblioteca padrao.
+#
+# ESTE ARQUIVO NAO EXISTIA, e a consequencia era silenciosa: a varredura de
+# seguranca informava "0 dependencias verificadas -- nenhuma vulneravel", que lido
+# rapido parece "esta limpo" e na verdade significa "nao havia manifesto para
+# medir". libtorrent e' uma extensao nativa em C++ que fala com a rede: e'
+# justamente o tipo de dependencia que merece acompanhamento.
+#
+# VERSAO FIXA: o OSV precisa de versao concreta para responder se ha' CVE.
+libtorrent==2.0.13.0
