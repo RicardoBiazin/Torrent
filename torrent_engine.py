@@ -8,16 +8,26 @@ Usado tanto pela CLI (torrent_downloader.py) quanto pela GUI (torrent_gui.py).
 import hashlib
 import json
 import os
+import sys
 import time
 
 import libtorrent as lt
 
-STATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".state")
+__version__ = "1.0.0"
+
+# No .exe (PyInstaller --onefile) __file__ aponta para a pasta temporaria de
+# extracao, apagada ao fechar: estado e downloads ficam ao lado do executavel.
+if getattr(sys, "frozen", False):
+    BASE_DIR = os.path.dirname(os.path.abspath(sys.executable))
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+STATE_DIR = os.path.join(BASE_DIR, ".state")
 JOBS_FILE = os.path.join(STATE_DIR, "jobs.json")
 SETTINGS_FILE = os.path.join(STATE_DIR, "settings.json")
 
 DEFAULT_SETTINGS = {
-    "save_path": os.path.join(os.path.dirname(os.path.abspath(__file__)), "downloads"),
+    "save_path": os.path.join(BASE_DIR, "downloads"),
     "max_down_kbs": 0,      # 0 = ilimitado
     "max_up_kbs": 100,
     "port_min": 6881,
@@ -227,8 +237,12 @@ class TorrentEngine:
     def remove_torrent(self, info_hash: str, delete_files: bool = False) -> None:
         handle = self.handles.get(info_hash)
         if handle:
-            flag = lt.options_t.delete_files if delete_files else lt.options_t(0)
-            self.session.remove_torrent(handle, flag)
+            # lt.options_t(0) nao e' aceito pelo binding (ArgumentError): sem
+            # apagar arquivos, chama sem flag
+            if delete_files:
+                self.session.remove_torrent(handle, lt.options_t.delete_files)
+            else:
+                self.session.remove_torrent(handle)
             del self.handles[info_hash]
         self.jobs.pop(info_hash, None)
         resume_file = os.path.join(STATE_DIR, f"{info_hash}.fastresume")
@@ -255,7 +269,10 @@ class TorrentEngine:
     def set_sequential(self, info_hash: str, sequential: bool) -> None:
         handle = self.handles.get(info_hash)
         if handle:
-            handle.set_sequential_download(sequential)
+            if sequential:
+                handle.set_flags(lt.torrent_flags.sequential_download)
+            else:
+                handle.unset_flags(lt.torrent_flags.sequential_download)
             if info_hash in self.jobs:
                 self.jobs[info_hash]["sequential"] = sequential
                 self._save_jobs()
@@ -367,7 +384,9 @@ class TorrentEngine:
         pending = 0
         for handle in self.handles.values():
             if handle.is_valid() and handle.status().has_metadata:
-                handle.save_resume_data()
+                # save_info_dict: sem ele o .fastresume nao leva os metadados e o
+                # torrent reabre em "obtendo metadados", mesmo vindo de .torrent
+                handle.save_resume_data(lt.torrent_handle.save_info_dict)
                 pending += 1
 
         deadline = time.time() + timeout
@@ -377,8 +396,12 @@ class TorrentEngine:
                 if isinstance(alert, lt.save_resume_data_alert):
                     info_hash = str(alert.handle.info_hash())
                     resume_file = os.path.join(STATE_DIR, f"{info_hash}.fastresume")
+                    # write_resume_data_buf, nao bencode: alert.params e' um
+                    # add_torrent_params, e lt.bencode() dele gera um dicionario
+                    # vazio -- o .fastresume saia com 2 bytes e era descartado
+                    # na abertura seguinte, forcando nova verificacao completa.
                     with open(resume_file, "wb") as f:
-                        f.write(lt.bencode(alert.params))
+                        f.write(lt.write_resume_data_buf(alert.params))
                     pending -= 1
                 elif isinstance(alert, lt.save_resume_data_failed_alert):
                     pending -= 1

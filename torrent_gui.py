@@ -11,7 +11,7 @@ import sys
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 
-from torrent_engine import TorrentEngine, format_size, format_speed
+from torrent_engine import TorrentEngine, __version__, format_size, format_speed
 import geoip
 
 REFRESH_MS = 1000
@@ -27,7 +27,7 @@ PIECE_COLORS = {
 class TorrentGUI(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Torrent Downloader - rapido e seguro")
+        self.title(f"Torrent Downloader {__version__} - rapido e seguro")
         self.geometry("1040x780")
         self.minsize(820, 560)
 

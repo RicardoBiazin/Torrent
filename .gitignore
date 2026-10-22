@@ -15,3 +15,8 @@ downloads/
 *.parts
 
 *.log
+
+# Build do executavel (PyInstaller)
+build/
+dist/
+*.spec

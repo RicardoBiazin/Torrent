@@ -19,20 +19,7 @@ import signal
 
 import libtorrent as lt
 
-
-def format_speed(bytes_per_sec: float) -> str:
-    kb = bytes_per_sec / 1024
-    if kb < 1024:
-        return f"{kb:.1f} KB/s"
-    return f"{kb / 1024:.2f} MB/s"
-
-
-def format_size(num_bytes: int) -> str:
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if num_bytes < 1024:
-            return f"{num_bytes:.1f} {unit}"
-        num_bytes /= 1024
-    return f"{num_bytes:.1f} PB"
+from torrent_engine import __version__, format_size, format_speed
 
 
 def build_session(port_min: int, port_max: int, max_down_kbs: int, max_up_kbs: int) -> lt.session:
@@ -82,13 +69,15 @@ def add_torrent(ses: lt.session, source: str, save_path: str, sequential: bool) 
             "save_path": save_path,
             "storage_mode": lt.storage_mode_t.storage_mode_sparse,
         })
-        handle.set_sequential_download(sequential)
+        if sequential:
+            handle.set_flags(lt.torrent_flags.sequential_download)
 
     return handle
 
 
 def main():
     parser = argparse.ArgumentParser(description="Baixador de torrents rapido e seguro.")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("source", help="Magnet link ou caminho para arquivo .torrent")
     parser.add_argument("-o", "--output", default="downloads", help="Pasta de destino (padrao: ./downloads)")
     parser.add_argument("--max-down", type=int, default=0, help="Limite de download em KB/s (0 = ilimitado)")
