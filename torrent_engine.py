@@ -3,17 +3,20 @@ Engine de torrents: encapsula a sessao libtorrent e o gerenciamento de
 multiplos downloads (adicionar, pausar, retomar, remover, persistir estado).
 
 Usado tanto pela CLI (torrent_downloader.py) quanto pela GUI (torrent_gui.py).
+O agendamento (scheduler.py) e o streaming (streaming.py) atuam por aqui.
 """
 
-import hashlib
 import json
 import os
 import sys
 import time
+from datetime import datetime
 
 import libtorrent as lt
 
-__version__ = "1.0.0"
+import scheduler
+
+__version__ = "1.1.0"
 
 # No .exe (PyInstaller --onefile) __file__ aponta para a pasta temporaria de
 # extracao, apagada ao fechar: estado e downloads ficam ao lado do executavel.
@@ -34,6 +37,14 @@ DEFAULT_SETTINGS = {
     "port_max": 6891,
     "max_active_downloads": 5,
     "sequential_default": False,
+    "schedule_enabled": False,
+    "schedule": [],         # regras de scheduler.py
+    "player_path": "",      # vazio = procura VLC/mpv; sem player, abre no navegador
+}
+
+MEDIA_EXTENSIONS = {
+    ".mp4", ".m4v", ".mkv", ".webm", ".avi", ".mov", ".wmv", ".mpg", ".mpeg", ".ts", ".flv",
+    ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".wav", ".wma",
 }
 
 STATE_NAMES = [
@@ -86,6 +97,11 @@ class TorrentEngine:
         self.session = self._build_session()
         self.handles: dict[str, lt.torrent_handle] = {}  # info_hash -> handle
         self.jobs: dict[str, dict] = self._load_jobs()
+        # efeito atual do agendamento e o que ele mudou, para desfazer so' isso
+        self._sched_download = True
+        self._sched_upload = True
+        self._sched_session_paused = False
+        self._sched_upload_mode: set[str] = set()
 
     # ------------------------------------------------------------------ #
     # Sessao
@@ -112,23 +128,93 @@ class TorrentEngine:
             "active_downloads": s["max_active_downloads"],
             "active_seeds": 10,
             "active_limit": s["max_active_downloads"] + 10,
-            "download_rate_limit": s["max_down_kbs"] * 1024 if s["max_down_kbs"] > 0 else 0,
-            "upload_rate_limit": s["max_up_kbs"] * 1024 if s["max_up_kbs"] > 0 else 0,
             "alert_mask": alert_mask,
         }
+        session_settings.update(self._rate_limits(upload_allowed=True))
         return lt.session(session_settings)
+
+    def _rate_limits(self, upload_allowed: bool | None = None) -> dict:
+        s = self.settings
+        if upload_allowed is None:
+            upload_allowed = getattr(self, "_sched_upload", True)
+        up = s["max_up_kbs"] * 1024 if s["max_up_kbs"] > 0 else 0
+        if not upload_allowed:
+            # 0 no libtorrent quer dizer ILIMITADO; 1 byte/s e' o mais perto de parado
+            up = 1
+        return {
+            "download_rate_limit": s["max_down_kbs"] * 1024 if s["max_down_kbs"] > 0 else 0,
+            "upload_rate_limit": up,
+        }
 
     def apply_settings(self, new_settings: dict) -> None:
         """Atualiza limites de velocidade e portas em tempo real."""
         self.settings.update(new_settings)
         save_settings(self.settings)
         s = self.settings
-        self.session.apply_settings({
-            "download_rate_limit": s["max_down_kbs"] * 1024 if s["max_down_kbs"] > 0 else 0,
-            "upload_rate_limit": s["max_up_kbs"] * 1024 if s["max_up_kbs"] > 0 else 0,
-            "active_downloads": s["max_active_downloads"],
-            "active_limit": s["max_active_downloads"] + 10,
-        })
+        limits = self._rate_limits()
+        limits["active_downloads"] = s["max_active_downloads"]
+        limits["active_limit"] = s["max_active_downloads"] + 10
+        self.session.apply_settings(limits)
+        self.apply_schedule()
+
+    # ------------------------------------------------------------------ #
+    # Agendamento
+    # ------------------------------------------------------------------ #
+
+    def apply_schedule(self, now: datetime | None = None) -> str | None:
+        """
+        Aplica as regras de horario. Chamar periodicamente (a GUI chama a cada
+        segundo). Retorna a descricao do efeito ativo, ou None se nada parado.
+
+        Nao mexe no "pausado" de cada torrent: o que o usuario pausou continua
+        pausado quando a regra termina, e o que estava rodando volta a rodar.
+        - download e upload parados: pausa a sessao inteira
+        - so' download parado: upload_mode nos torrents (continuam semeando)
+        - so' upload parado: limite de upload de 1 byte/s
+        """
+        s = self.settings
+        if s.get("schedule_enabled") and s.get("schedule"):
+            down, up, _active = scheduler.current_effect(s["schedule"], now or datetime.now())
+        else:
+            down, up = True, True
+
+        both_off = not down and not up
+        if both_off and not self._sched_session_paused:
+            self.session.pause()
+            self._sched_session_paused = True
+        elif not both_off and self._sched_session_paused:
+            self.session.resume()
+            self._sched_session_paused = False
+
+        upload_only = not down and up
+        for info_hash, handle in list(self.handles.items()):
+            if not handle.is_valid():
+                continue
+            if upload_only and info_hash not in self._sched_upload_mode:
+                # torrent que ja estava em upload_mode (ex.: erro de disco) nao e' nosso
+                if not handle.flags() & lt.torrent_flags.upload_mode:
+                    handle.set_flags(lt.torrent_flags.upload_mode)
+                    self._sched_upload_mode.add(info_hash)
+            elif not upload_only and info_hash in self._sched_upload_mode:
+                handle.unset_flags(lt.torrent_flags.upload_mode)
+                self._sched_upload_mode.discard(info_hash)
+
+        if up != self._sched_upload:
+            self._sched_upload = up
+            self.session.apply_settings(self._rate_limits())
+        self._sched_download = down
+        return scheduler.describe_effect(down, up)
+
+    def _clear_schedule_effects(self) -> None:
+        """Desfaz o agendamento antes de salvar a retomada (o upload_mode iria junto)."""
+        for info_hash in list(self._sched_upload_mode):
+            handle = self.handles.get(info_hash)
+            if handle and handle.is_valid():
+                handle.unset_flags(lt.torrent_flags.upload_mode)
+        self._sched_upload_mode.clear()
+        if self._sched_session_paused:
+            self.session.resume()
+            self._sched_session_paused = False
 
     # ------------------------------------------------------------------ #
     # Persistencia de jobs (para retomar downloads entre sessoes)
@@ -245,6 +331,7 @@ class TorrentEngine:
                 self.session.remove_torrent(handle)
             del self.handles[info_hash]
         self.jobs.pop(info_hash, None)
+        self._sched_upload_mode.discard(info_hash)
         resume_file = os.path.join(STATE_DIR, f"{info_hash}.fastresume")
         if os.path.isfile(resume_file):
             os.remove(resume_file)
@@ -408,8 +495,36 @@ class TorrentEngine:
             time.sleep(0.1)
 
     def shutdown(self) -> None:
+        self._clear_schedule_effects()
         self.save_all_resume_data()
         self._save_jobs()
+
+
+    # ------------------------------------------------------------------ #
+    # Arquivos (usado pelo streaming)
+    # ------------------------------------------------------------------ #
+
+    def get_files(self, info_hash: str) -> list[dict]:
+        """Arquivos do torrent com tamanho e quanto ja foi baixado. Vazio sem metadados."""
+        handle = self.handles.get(info_hash)
+        if not handle or not handle.is_valid() or not handle.status().has_metadata:
+            return []
+        fs = handle.torrent_file().files()
+        progress = handle.file_progress()
+        files = []
+        for i in range(fs.num_files()):
+            if fs.file_flags(i) & lt.file_storage.flag_pad_file:
+                continue  # preenchimento de alinhamento (torrents v2/hibridos), nao e' arquivo real
+            path = fs.file_path(i)
+            files.append({
+                "index": i,
+                "path": path,
+                "name": os.path.basename(path),
+                "size": fs.file_size(i),
+                "done": progress[i] if i < len(progress) else 0,
+                "is_media": os.path.splitext(path)[1].lower() in MEDIA_EXTENSIONS,
+            })
+        return files
 
 
 def job_timestamp() -> str:

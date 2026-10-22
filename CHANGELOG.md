@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.1.0 - 2026-10-21
+
+### Adicionado
+- Streaming: botão **Reproduzir** toca vídeo ou áudio enquanto baixa. Servidor HTTP local (só `127.0.0.1`) com suporte a Range; as peças do trecho pedido pelo player são baixadas primeiro (`set_piece_deadline`). Abre no player configurado, no VLC ou mpv, ou no navegador.
+- Agendamento: regras por dia da semana e horário para parar downloads, uploads ou os dois. Aceita regra que atravessa a meia-noite e regra de dia inteiro. Não altera o que foi pausado à mão.
+- Configuração do player usado no streaming.
+- Testes do agendamento e do streaming (seed local com velocidade limitada).
+
+### Corrigido
+- A lista de arquivos ignora os arquivos de preenchimento (pad) de torrents v2 e híbridos.
+
 ## 1.0.0 - 2026-10-21
 
 Primeira versão pública.

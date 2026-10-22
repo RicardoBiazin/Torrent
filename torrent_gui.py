@@ -13,6 +13,8 @@ from tkinter import ttk, filedialog, messagebox, simpledialog
 
 from torrent_engine import TorrentEngine, __version__, format_size, format_speed
 import geoip
+import scheduler
+from streaming import StreamServer
 
 REFRESH_MS = 1000
 
@@ -32,6 +34,7 @@ class TorrentGUI(tk.Tk):
         self.minsize(820, 560)
 
         self.engine = TorrentEngine()
+        self.streamer = StreamServer(self.engine)
         self._row_by_hash: dict[str, str] = {}
 
         self._build_toolbar()
@@ -58,7 +61,9 @@ class TorrentGUI(tk.Tk):
         ttk.Button(bar, text="Remover", command=self._remove_selected).pack(side=tk.LEFT, padx=2)
         ttk.Separator(bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=6)
         ttk.Button(bar, text="Abrir pasta", command=self._open_folder_selected).pack(side=tk.LEFT, padx=2)
+        ttk.Button(bar, text="Reproduzir", command=self._play_selected).pack(side=tk.LEFT, padx=2)
         ttk.Button(bar, text="Configuracoes", command=self._open_settings).pack(side=tk.RIGHT, padx=2)
+        ttk.Button(bar, text="Agendamento", command=self._open_schedule).pack(side=tk.RIGHT, padx=2)
 
     def _build_table(self):
         columns = ("name", "progress", "state", "down", "up", "peers", "size")
@@ -208,6 +213,35 @@ class TorrentGUI(tk.Tk):
     def _open_settings(self):
         SettingsDialog(self, self.engine)
 
+    def _open_schedule(self):
+        ScheduleDialog(self, self.engine)
+
+    def _play_selected(self):
+        info_hash = self._selected_hash()
+        if not info_hash:
+            messagebox.showinfo("Reproduzir", "Selecione um torrent na lista.")
+            return
+        files = self.engine.get_files(info_hash)
+        if not files:
+            messagebox.showinfo("Reproduzir", "O torrent ainda esta obtendo metadados. Tente em instantes.")
+            return
+        media = [f for f in files if f["is_media"]]
+        if len(media) == 1:
+            self._start_stream(info_hash, media[0])
+            return
+        FileChooser(self, media or files, lambda f: self._start_stream(info_hash, f),
+                    warn_not_media=not media)
+
+    def _start_stream(self, info_hash: str, file: dict):
+        try:
+            url = self.streamer.prepare(info_hash, file["index"])
+            where = self.streamer.open_in_player(url, file["name"], self.engine.settings.get("player_path", ""))
+        except Exception as exc:
+            messagebox.showerror("Erro ao reproduzir", str(exc))
+            return
+        self._stream_msg = f'{where}: "{file["name"]}" ({url})'
+        self.status_var.set(self._stream_msg)
+
     # ------------------------------------------------------------------ #
     # Loop de atualizacao
     # ------------------------------------------------------------------ #
@@ -246,10 +280,18 @@ class TorrentGUI(tk.Tk):
                 del self._row_by_hash[info_hash]
 
         self._update_detail_panel(statuses)
-        self.status_var.set(
+        sched = self.engine.apply_schedule()
+        text = (
             f"{len(statuses)} torrent(s) | Total download: {format_speed(total_down)} | "
-            f"Total upload: {format_speed(total_up)} | Pasta padrao: {self.engine.settings['save_path']}"
+            f"Total upload: {format_speed(total_up)}"
         )
+        if sched:
+            text += f" | Agendamento: {sched}"
+        if getattr(self, "_stream_msg", None):
+            text += f" | {self._stream_msg}"
+        else:
+            text += f" | Pasta padrao: {self.engine.settings['save_path']}"
+        self.status_var.set(text)
 
         self.after(REFRESH_MS, self._refresh)
 
@@ -328,6 +370,7 @@ class TorrentGUI(tk.Tk):
     def _on_close(self):
         self.status_var.set("Salvando estado, aguarde...")
         self.update()
+        self.streamer.stop()
         self.engine.shutdown()
         self.destroy()
 
@@ -350,6 +393,7 @@ class SettingsDialog(tk.Toplevel):
         self.port_max_var = tk.IntVar(value=s["port_max"])
         self.max_active_var = tk.IntVar(value=s["max_active_downloads"])
         self.sequential_default_var = tk.BooleanVar(value=s["sequential_default"])
+        self.player_var = tk.StringVar(value=s.get("player_path", ""))
 
         row = 0
         ttk.Label(self, text="Pasta de downloads:").grid(row=row, column=0, sticky=tk.W, **pad)
@@ -383,6 +427,11 @@ class SettingsDialog(tk.Toplevel):
         ).grid(row=row, column=0, columnspan=2, sticky=tk.W, **pad)
         row += 1
 
+        ttk.Label(self, text="Player para streaming (vazio = VLC/mpv):").grid(row=row, column=0, sticky=tk.W, **pad)
+        ttk.Entry(self, textvariable=self.player_var, width=40).grid(row=row, column=1, **pad)
+        ttk.Button(self, text="...", width=3, command=self._choose_player).grid(row=row, column=2, **pad)
+        row += 1
+
         note = ttk.Label(
             self,
             text="Nota: alteracoes de porta exigem reiniciar o programa para ter efeito completo.",
@@ -404,6 +453,12 @@ class SettingsDialog(tk.Toplevel):
         if path:
             self.save_path_var.set(path)
 
+    def _choose_player(self):
+        path = filedialog.askopenfilename(title="Selecione o player",
+                                          filetypes=[("Programa", "*.exe"), ("Todos", "*.*")])
+        if path:
+            self.player_var.set(path)
+
     def _save(self):
         try:
             new_settings = {
@@ -414,6 +469,7 @@ class SettingsDialog(tk.Toplevel):
                 "port_max": int(self.port_max_var.get()),
                 "max_active_downloads": int(self.max_active_var.get()),
                 "sequential_default": bool(self.sequential_default_var.get()),
+                "player_path": self.player_var.get().strip(),
             }
         except (ValueError, tk.TclError):
             messagebox.showerror("Valor invalido", "Verifique se os campos numericos foram preenchidos corretamente.")
@@ -421,6 +477,155 @@ class SettingsDialog(tk.Toplevel):
 
         os.makedirs(new_settings["save_path"], exist_ok=True)
         self.engine.apply_settings(new_settings)
+        self.destroy()
+
+
+class FileChooser(tk.Toplevel):
+    """Escolhe qual arquivo do torrent reproduzir."""
+
+    def __init__(self, parent, files: list[dict], on_choose, warn_not_media: bool = False):
+        super().__init__(parent)
+        self.title("Reproduzir arquivo")
+        self.files = sorted(files, key=lambda f: f["size"], reverse=True)
+        self.on_choose = on_choose
+
+        text = "Escolha o arquivo para reproduzir enquanto baixa:"
+        if warn_not_media:
+            text = "Nenhum arquivo de video/audio reconhecido. Escolha um arquivo mesmo assim:"
+        ttk.Label(self, text=text, padding=8).pack(anchor=tk.W)
+
+        self.tree = ttk.Treeview(self, columns=("name", "size", "done"), show="headings", height=10)
+        for col, title, width in (("name", "Arquivo", 380), ("size", "Tamanho", 90), ("done", "Baixado", 70)):
+            self.tree.heading(col, text=title)
+            self.tree.column(col, width=width, anchor=tk.W if col == "name" else tk.CENTER)
+        for i, f in enumerate(self.files):
+            pct = f["done"] / f["size"] * 100 if f["size"] else 100
+            self.tree.insert("", tk.END, iid=str(i), values=(f["path"], format_size(f["size"]), f"{pct:.0f}%"))
+        if self.files:
+            self.tree.selection_set("0")
+        self.tree.pack(fill=tk.BOTH, expand=True, padx=8)
+        self.tree.bind("<Double-1>", lambda _e: self._ok())
+
+        btns = ttk.Frame(self, padding=8)
+        btns.pack()
+        ttk.Button(btns, text="Reproduzir", command=self._ok).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Cancelar", command=self.destroy).pack(side=tk.LEFT, padx=4)
+        self.transient(parent)
+        self.grab_set()
+
+    def _ok(self):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        f = self.files[int(sel[0])]
+        self.destroy()
+        self.on_choose(f)
+
+
+class ScheduleDialog(tk.Toplevel):
+    """Regras de horario para parar downloads e/ou uploads."""
+
+    STATES = ("Liberado", "Parado")
+
+    def __init__(self, parent: TorrentGUI, engine: TorrentEngine):
+        super().__init__(parent)
+        self.title("Agendamento de horarios")
+        self.resizable(False, False)
+        self.engine = engine
+        self.rules = [dict(r) for r in engine.settings.get("schedule", [])]
+        pad = {"padx": 8, "pady": 4}
+
+        self.enabled_var = tk.BooleanVar(value=engine.settings.get("schedule_enabled", False))
+        ttk.Checkbutton(self, text="Ativar agendamento", variable=self.enabled_var).grid(
+            row=0, column=0, columnspan=2, sticky=tk.W, **pad)
+
+        cols = ("days", "start", "end", "down", "up")
+        self.tree = ttk.Treeview(self, columns=cols, show="headings", height=6, selectmode="browse")
+        for col, title, width in (("days", "Dias", 180), ("start", "Inicio", 60), ("end", "Fim", 60),
+                                  ("down", "Download", 80), ("up", "Upload", 80)):
+            self.tree.heading(col, text=title)
+            self.tree.column(col, width=width, anchor=tk.W if col == "days" else tk.CENTER)
+        self.tree.grid(row=1, column=0, columnspan=2, sticky=tk.EW, **pad)
+        ttk.Button(self, text="Remover regra selecionada", command=self._remove).grid(
+            row=2, column=0, columnspan=2, sticky=tk.W, **pad)
+
+        form = ttk.LabelFrame(self, text="Nova regra", padding=8)
+        form.grid(row=3, column=0, columnspan=2, sticky=tk.EW, **pad)
+
+        days_frame = ttk.Frame(form)
+        days_frame.grid(row=0, column=0, columnspan=4, sticky=tk.W)
+        self.day_vars = []
+        for i, name in enumerate(scheduler.DAY_NAMES):
+            var = tk.BooleanVar(value=i < 5)
+            ttk.Checkbutton(days_frame, text=name, variable=var).pack(side=tk.LEFT, padx=2)
+            self.day_vars.append(var)
+
+        self.start_var = tk.StringVar(value="08:00")
+        self.end_var = tk.StringVar(value="18:00")
+        ttk.Label(form, text="Das").grid(row=1, column=0, sticky=tk.W, pady=(6, 0))
+        ttk.Entry(form, textvariable=self.start_var, width=7).grid(row=1, column=1, sticky=tk.W, pady=(6, 0))
+        ttk.Label(form, text="as").grid(row=1, column=2, sticky=tk.W, pady=(6, 0))
+        ttk.Entry(form, textvariable=self.end_var, width=7).grid(row=1, column=3, sticky=tk.W, pady=(6, 0))
+
+        self.down_var = tk.StringVar(value="Parado")
+        self.up_var = tk.StringVar(value="Liberado")
+        ttk.Label(form, text="Download:").grid(row=2, column=0, sticky=tk.W, pady=(6, 0))
+        ttk.Combobox(form, textvariable=self.down_var, values=self.STATES, state="readonly", width=9).grid(
+            row=2, column=1, sticky=tk.W, pady=(6, 0))
+        ttk.Label(form, text="Upload:").grid(row=2, column=2, sticky=tk.W, pady=(6, 0))
+        ttk.Combobox(form, textvariable=self.up_var, values=self.STATES, state="readonly", width=9).grid(
+            row=2, column=3, sticky=tk.W, pady=(6, 0))
+        ttk.Button(form, text="Adicionar regra", command=self._add).grid(row=3, column=0, columnspan=4,
+                                                                          sticky=tk.W, pady=(8, 0))
+
+        ttk.Label(
+            self, foreground="gray", justify=tk.LEFT,
+            text="Fim antes do inicio (ex.: 23:00 as 06:00) atravessa a meia-noite.\n"
+                 "Inicio igual ao fim vale o dia inteiro. Upload parado deixa o download lento:\n"
+                 "os outros peers dao prioridade a quem tambem envia.",
+        ).grid(row=4, column=0, columnspan=2, sticky=tk.W, padx=8)
+
+        btns = ttk.Frame(self)
+        btns.grid(row=5, column=0, columnspan=2, pady=8)
+        ttk.Button(btns, text="Salvar", command=self._save).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Cancelar", command=self.destroy).pack(side=tk.LEFT, padx=4)
+
+        self._fill()
+        self.transient(parent)
+        self.grab_set()
+
+    def _fill(self):
+        self.tree.delete(*self.tree.get_children())
+        for i, r in enumerate(self.rules):
+            self.tree.insert("", tk.END, iid=str(i), values=(
+                scheduler.describe_days(r["days"]), r["start"], r["end"],
+                "Liberado" if r["download"] else "Parado",
+                "Liberado" if r["upload"] else "Parado",
+            ))
+
+    def _add(self):
+        try:
+            rule = scheduler.validate_rule({
+                "days": [i for i, v in enumerate(self.day_vars) if v.get()],
+                "start": self.start_var.get(),
+                "end": self.end_var.get(),
+                "download": self.down_var.get() == "Liberado",
+                "upload": self.up_var.get() == "Liberado",
+            })
+        except ValueError as exc:
+            messagebox.showerror("Regra invalida", str(exc), parent=self)
+            return
+        self.rules.append(rule)
+        self._fill()
+
+    def _remove(self):
+        sel = self.tree.selection()
+        if sel:
+            del self.rules[int(sel[0])]
+            self._fill()
+
+    def _save(self):
+        self.engine.apply_settings({"schedule_enabled": bool(self.enabled_var.get()), "schedule": self.rules})
         self.destroy()
 
 

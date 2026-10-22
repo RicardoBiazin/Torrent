@@ -43,7 +43,7 @@ def ambiente(tmp_path, monkeypatch):
 
     dados = tmp_path / "dados"
     (dados / "conteudo").mkdir(parents=True)
-    (dados / "conteudo" / "a.bin").write_bytes(os.urandom(300_000))
+    (dados / "conteudo" / "a.bin").write_bytes(os.urandom(3_000_000))
     (dados / "conteudo" / "b.txt").write_text("ola torrent\n" * 100, encoding="utf-8")
 
     fs = lt.file_storage()
