@@ -280,6 +280,7 @@ class TorrentGUI(tk.Tk):
                 del self._row_by_hash[info_hash]
 
         self._update_detail_panel(statuses)
+        self.engine.process_alerts()  # sem isso a fila de alertas so' cresce
         sched = self.engine.apply_schedule()
         text = (
             f"{len(statuses)} torrent(s) | Total download: {format_speed(total_down)} | "

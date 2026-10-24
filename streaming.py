@@ -24,6 +24,8 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import quote, unquote
 
+from torrent_engine import torrent_layout
+
 
 # o mimetypes do Windows nao conhece alguns formatos comuns em torrent
 mimetypes.add_type("video/x-matroska", ".mkv")
@@ -104,7 +106,7 @@ class StreamServer:
         if not handle or not handle.is_valid() or not handle.status().has_metadata:
             raise RuntimeError("Torrent ainda sem metadados: aguarde aparecer o tamanho.")
         ti = handle.torrent_file()
-        fs = ti.files()
+        fs = torrent_layout(ti)
         if not 0 <= file_index < fs.num_files():
             raise ValueError("Arquivo invalido.")
 
@@ -170,7 +172,7 @@ class _StreamHandler(BaseHTTPRequestHandler):
         if not handle or not handle.is_valid() or not handle.status().has_metadata:
             return self._error(404, "Torrent nao encontrado ou sem metadados.")
         ti = handle.torrent_file()
-        fs = ti.files()
+        fs = torrent_layout(ti)
         if not 0 <= file_index < fs.num_files():
             return self._error(404, "Arquivo nao encontrado.")
 
@@ -196,42 +198,33 @@ class _StreamHandler(BaseHTTPRequestHandler):
         if not send_body or length == 0:
             return
 
-        disk_path = os.path.join(handle.status().save_path, fs.file_path(file_index))
         try:
-            self._send_range(handle, ti, file_index, disk_path, start, end)
+            self._send_range(info_hash, handle, ti, file_index, start, end)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             pass  # player fechou ou pulou para outro ponto: normal
-        except TimeoutError:
-            pass  # peca nao chegou (sem peers): o player mostra erro/espera
+        except (TimeoutError, OSError):
+            pass  # peca nao chegou (sem peers) ou erro de leitura: o player mostra erro/espera
 
-    def _send_range(self, handle, ti, file_index, disk_path, start, end) -> None:
+    def _send_range(self, info_hash, handle, ti, file_index, start, end) -> None:
         piece_len = ti.piece_length()
         ahead = max(4, READAHEAD_BYTES // piece_len)
-        f = None
-        try:
-            pos = start
-            while pos <= end:
-                req = ti.map_file(file_index, pos, 1)
-                piece = req.piece
-                self._prioritize(handle, ti, piece, ahead)
-                self._wait_piece(handle, piece)
+        pos = start
+        while pos <= end:
+            req = ti.map_file(file_index, pos, 1)
+            piece = req.piece
+            self._prioritize(handle, ti, piece, ahead)
+            self._wait_piece(handle, piece)
 
-                # le ate o fim desta peca (ou do trecho pedido)
-                n = min(ti.piece_size(piece) - req.start, end - pos + 1)
-                if f is None:
-                    f = open(disk_path, "rb")
-                f.seek(pos)
-                left = n
-                while left > 0:
-                    data = f.read(min(CHUNK, left))
-                    if not data:
-                        raise ConnectionAbortedError("arquivo menor que o esperado")
-                    self.wfile.write(data)
-                    left -= len(data)
-                pos += n
-        finally:
-            if f:
-                f.close()
+            # entrega ate o fim desta peca (ou do trecho pedido); a peca vem do
+            # libtorrent, nao do disco (ver TorrentEngine.read_piece)
+            n = min(ti.piece_size(piece) - req.start, end - pos + 1)
+            data = self.stream.engine.read_piece(info_hash, piece)
+            chunk = data[req.start:req.start + n]
+            if len(chunk) != n:
+                raise ConnectionAbortedError("peca menor que o esperado")
+            for i in range(0, n, CHUNK):
+                self.wfile.write(chunk[i:i + CHUNK])
+            pos += n
 
     @staticmethod
     def _prioritize(handle, ti, piece: int, ahead: int) -> None:

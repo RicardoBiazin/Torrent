@@ -63,12 +63,11 @@ def add_torrent(ses: lt.session, source: str, save_path: str, sequential: bool) 
         if not os.path.isfile(source):
             print(f"Erro: arquivo .torrent nao encontrado: {source}")
             sys.exit(1)
-        info = lt.torrent_info(source)
-        handle = ses.add_torrent({
-            "ti": info,
-            "save_path": save_path,
-            "storage_mode": lt.storage_mode_t.storage_mode_sparse,
-        })
+        params = lt.add_torrent_params()
+        params.ti = lt.torrent_info(source)
+        params.save_path = save_path
+        params.storage_mode = lt.storage_mode_t.storage_mode_sparse
+        handle = ses.add_torrent(params)
         if sequential:
             handle.set_flags(lt.torrent_flags.sequential_download)
 

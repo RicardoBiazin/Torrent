@@ -24,8 +24,10 @@ def seed_e_leecher(ambiente, tmp_path):  # noqa: F811
         "ignore_limits_on_local_network": False,
         "upload_rate_limit": 2 * 1024 * 1024,
     })
-    seed.add_torrent({"ti": lt.torrent_info(ambiente["torrent"]),
-                      "save_path": ambiente["settings"]["save_path"]})
+    params = lt.add_torrent_params()
+    params.ti = lt.torrent_info(ambiente["torrent"])
+    params.save_path = ambiente["settings"]["save_path"]
+    seed.add_torrent(params)
     time.sleep(0.5)
 
     vazio = tmp_path / "baixando"

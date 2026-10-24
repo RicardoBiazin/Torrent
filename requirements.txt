@@ -10,4 +10,4 @@
 # justamente o tipo de dependencia que merece acompanhamento.
 #
 # VERSAO FIXA: o OSV precisa de versao concreta para responder se ha' CVE.
-libtorrent==2.0.13.0
+libtorrent==2.1.1

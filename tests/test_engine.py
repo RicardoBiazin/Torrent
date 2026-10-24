@@ -46,9 +46,7 @@ def ambiente(tmp_path, monkeypatch):
     (dados / "conteudo" / "a.bin").write_bytes(os.urandom(3_000_000))
     (dados / "conteudo" / "b.txt").write_text("ola torrent\n" * 100, encoding="utf-8")
 
-    fs = lt.file_storage()
-    lt.add_files(fs, str(dados / "conteudo"))
-    ct = lt.create_torrent(fs, piece_size=16384)
+    ct = lt.create_torrent(lt.list_files(str(dados / "conteudo")), 16384)
     lt.set_piece_hashes(ct, str(dados))
     arquivo = tmp_path / "teste.torrent"
     arquivo.write_bytes(lt.bencode(ct.generate()))

@@ -17,8 +17,11 @@ Cliente BitTorrent leve em Python, com interface gráfica (Tkinter) e linha de c
 Requer Python 3.10 ou mais novo.
 
 ```
-pip install -r requirements.txt
+python -m venv .venv
+.venv\Scripts\python -m pip install -r requirements.txt
 ```
+
+Usa libtorrent 2.1.1.
 
 ## Uso
 

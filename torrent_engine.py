@@ -9,6 +9,7 @@ O agendamento (scheduler.py) e o streaming (streaming.py) atuam por aqui.
 import json
 import os
 import sys
+import threading
 import time
 from datetime import datetime
 
@@ -16,7 +17,7 @@ import libtorrent as lt
 
 import scheduler
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 # No .exe (PyInstaller --onefile) __file__ aponta para a pasta temporaria de
 # extracao, apagada ao fechar: estado e downloads ficam ao lado do executavel.
@@ -69,6 +70,11 @@ def format_size(num_bytes: int) -> str:
     return f"{n:.1f} PB"
 
 
+def torrent_layout(ti):
+    """Arquivos do torrent: layout() no libtorrent 2.1 (files() ficou obsoleto), files() no 2.0."""
+    return ti.layout() if hasattr(ti, "layout") else ti.files()
+
+
 def load_settings() -> dict:
     os.makedirs(STATE_DIR, exist_ok=True)
     settings = dict(DEFAULT_SETTINGS)
@@ -102,6 +108,11 @@ class TorrentEngine:
         self._sched_upload = True
         self._sched_session_paused = False
         self._sched_upload_mode: set[str] = set()
+        # alertas: so' um thread por vez tira da fila e distribui
+        self._alert_lock = threading.Lock()
+        self._piece_cond = threading.Condition()
+        self._pieces: dict[tuple[str, int], bytes | None] = {}
+        self._resume_pending = 0
 
     # ------------------------------------------------------------------ #
     # Sessao
@@ -475,24 +486,69 @@ class TorrentEngine:
                 # torrent reabre em "obtendo metadados", mesmo vindo de .torrent
                 handle.save_resume_data(lt.torrent_handle.save_info_dict)
                 pending += 1
+        self._resume_pending += pending
 
         deadline = time.time() + timeout
-        while pending > 0 and time.time() < deadline:
+        while self._resume_pending > 0 and time.time() < deadline:
+            self.process_alerts(wait_ms=100)
+        self._resume_pending = 0
+
+    # ------------------------------------------------------------------ #
+    # Alertas e leitura de pecas
+    # ------------------------------------------------------------------ #
+
+    def process_alerts(self, wait_ms: int = 0) -> None:
+        """Tira os alertas da fila e trata os que interessam. Seguro entre threads."""
+        with self._alert_lock:
+            if wait_ms:
+                self.session.wait_for_alert(wait_ms)
             alerts = self.session.pop_alerts()
-            for alert in alerts:
-                if isinstance(alert, lt.save_resume_data_alert):
-                    info_hash = str(alert.handle.info_hash())
-                    resume_file = os.path.join(STATE_DIR, f"{info_hash}.fastresume")
-                    # write_resume_data_buf, nao bencode: alert.params e' um
-                    # add_torrent_params, e lt.bencode() dele gera um dicionario
-                    # vazio -- o .fastresume saia com 2 bytes e era descartado
-                    # na abertura seguinte, forcando nova verificacao completa.
-                    with open(resume_file, "wb") as f:
-                        f.write(lt.write_resume_data_buf(alert.params))
-                    pending -= 1
-                elif isinstance(alert, lt.save_resume_data_failed_alert):
-                    pending -= 1
-            time.sleep(0.1)
+        for alert in alerts:
+            if isinstance(alert, lt.read_piece_alert):
+                key = (str(alert.handle.info_hash()), alert.piece)
+                data = None if alert.error.value() else bytes(alert.buffer)
+                with self._piece_cond:
+                    self._pieces[key] = data
+                    self._piece_cond.notify_all()
+            elif isinstance(alert, lt.save_resume_data_alert):
+                info_hash = str(alert.handle.info_hash())
+                resume_file = os.path.join(STATE_DIR, f"{info_hash}.fastresume")
+                # write_resume_data_buf, nao bencode: alert.params e' um
+                # add_torrent_params, e lt.bencode() dele gera um dicionario
+                # vazio -- o .fastresume saia com 2 bytes e era descartado
+                # na abertura seguinte, forcando nova verificacao completa.
+                with open(resume_file, "wb") as f:
+                    f.write(lt.write_resume_data_buf(alert.params))
+                self._resume_pending -= 1
+            elif isinstance(alert, lt.save_resume_data_failed_alert):
+                self._resume_pending -= 1
+
+    def read_piece(self, info_hash: str, piece: int, timeout: float = 30.0) -> bytes:
+        """
+        Conteudo de uma peca ja baixada, lido pelo proprio libtorrent.
+
+        Ler o arquivo direto do disco nao serve: no libtorrent 2.1 a peca fica
+        "have" enquanto os dados ainda estao no cache de escrita, e o disco
+        devolve zeros.
+        """
+        handle = self.handles.get(info_hash)
+        if not handle or not handle.is_valid():
+            raise ConnectionAbortedError("torrent removido")
+        key = (info_hash, piece)
+        with self._piece_cond:
+            self._pieces.pop(key, None)
+        handle.read_piece(piece)
+        deadline = time.time() + timeout
+        while True:
+            with self._piece_cond:
+                if key in self._pieces:
+                    data = self._pieces.pop(key)
+                    if data is None:
+                        raise OSError(f"erro lendo a peca {piece}")
+                    return data
+            if time.time() > deadline:
+                raise TimeoutError(f"leitura da peca {piece} nao terminou")
+            self.process_alerts(wait_ms=50)
 
     def shutdown(self) -> None:
         self._clear_schedule_effects()
@@ -509,7 +565,7 @@ class TorrentEngine:
         handle = self.handles.get(info_hash)
         if not handle or not handle.is_valid() or not handle.status().has_metadata:
             return []
-        fs = handle.torrent_file().files()
+        fs = torrent_layout(handle.torrent_file())
         progress = handle.file_progress()
         files = []
         for i in range(fs.num_files()):

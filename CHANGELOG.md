@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.1.1 - 2026-10-24
+
+### Alterado
+- libtorrent 2.0.13 para 2.1.1. O executável agora é gerado com Python 3.13.17 e PyInstaller 6.22.3.
+- APIs que ficaram obsoletas no libtorrent 2.1 foram trocadas: `torrent_info.files()` por `layout()`, `add_torrent(dict)` por `add_torrent_params`.
+
+### Corrigido
+- Streaming no libtorrent 2.1: o trecho entregue ao player podia vir com zeros. A peça já constava como baixada enquanto os dados ainda estavam no cache de escrita, e a leitura direta do disco pegava o arquivo vazio. Agora a peça é lida pelo próprio libtorrent (`read_piece`).
+- A interface tira os alertas da fila a cada segundo; antes a fila só crescia.
+
 ## 1.1.0 - 2026-10-21
 
 ### Adicionado
